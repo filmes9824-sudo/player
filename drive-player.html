@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Drive Player</title>
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<style>
+:root{--bg:#101218;--card:#181b23;--tx:#e9eaf0;--mut:#8a8fa3;--ac:#6ee7c8;--bd:#272b37}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.4 system-ui,sans-serif;display:grid;grid-template-columns:1fr 360px;gap:16px;padding:16px;min-height:100vh}
+@media(max-width:900px){body{grid-template-columns:1fr}}
+section{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:12px;margin-bottom:12px}
+video{width:100%;max-height:68vh;background:#000;border-radius:6px;display:block}
+button,input,select{background:#232736;color:var(--tx);border:1px solid var(--bd);border-radius:6px;padding:6px 10px;font:inherit}
+button{cursor:pointer}
+button:hover,button:focus-visible{border-color:var(--ac);outline:none}
+input[type=text],input:not([type]),input[type=number]{min-width:0}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px}
+.row input[type=text]{flex:1}
+h2{margin:0 0 8px;font-size:15px}
+h1{margin:0 0 10px;font-size:18px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list{max-height:200px;overflow:auto}
+.item{display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid var(--bd)}
+.item span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.item.now span{color:var(--ac)}
+.item button{padding:2px 8px}
+.mut{color:var(--mut);font-size:13px}
+label{display:inline-flex;gap:6px;align-items:center}
+details summary{cursor:pointer}
+.stage{position:relative}
+.stage:fullscreen{background:#000;display:flex;align-items:center}
+.stage:fullscreen video{max-height:100vh;height:100%}
+.cd{position:absolute;left:50%;bottom:112px;transform:translateX(-50%);background:rgba(16,18,24,.92);border:1px solid var(--bd);border-radius:10px;padding:10px 14px;display:none;gap:10px;align-items:center;white-space:nowrap}
+.cd.on{display:flex}
+.cd b{color:var(--ac)}
+.ui{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;pointer-events:none;transition:opacity .25s;border-radius:6px;color:#fff;background:linear-gradient(rgba(0,0,0,.65),transparent 22%,transparent 60%,rgba(0,0,0,.85))}
+.ui>*{pointer-events:auto}
+.stage.idle{cursor:none}
+.stage.idle .ui{opacity:0}
+.stage.idle .ui>*{pointer-events:none}
+.top{padding:14px 18px;font-size:17px;font-weight:600;text-shadow:0 1px 4px #000;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.bar{padding:0 14px 10px}
+.seek{position:relative;height:18px;cursor:pointer;display:flex;align-items:center;touch-action:none}
+.seek::before,.buf,.fill{content:'';position:absolute;left:0;height:4px;border-radius:3px;transition:height .1s}
+.seek::before{right:0;background:rgba(255,255,255,.22)}
+.seek:hover::before,.seek:hover .buf,.seek:hover .fill{height:6px}
+.buf{width:0;background:rgba(255,255,255,.32)}
+.fill{width:0;background:var(--ac);transition:width .25s linear,height .1s}
+.knob{position:absolute;left:0;width:14px;height:14px;border-radius:50%;background:var(--ac);transform:translateX(-50%) scale(0);transition:transform .1s,left .25s linear}
+.seek:hover .knob,.seek.drag .knob{transform:translateX(-50%) scale(1)}
+.seek.drag .fill,.seek.drag .knob{transition:none}
+.ctl{display:flex;align-items:center;gap:4px}
+.ctl button{background:none;border:0;font-size:20px;padding:4px 9px;border-radius:8px;color:#fff;line-height:1}
+.ctl button:hover{background:rgba(255,255,255,.18)}
+.ctl button.on{color:var(--ac)}
+.ctl .sp{flex:1}
+#time{font-variant-numeric:tabular-nums;font-size:13px;margin-left:8px;text-shadow:0 1px 3px #000}
+#vol{width:84px;padding:0;border:0;background:none;accent-color:var(--ac)}
+#rate{font-size:13px;padding:3px 4px;background:rgba(0,0,0,.45);color:#fff}
+@media (pointer:coarse){
+  .kbd{display:none}
+  .ctl button{font-size:24px;padding:8px 12px}
+  .seek{height:30px}
+  .seek .knob{transform:translateX(-50%) scale(1)}
+  .seek::before,.buf,.fill{height:6px}
+  #rate{font-size:15px;padding:6px 4px}
+  .item button{padding:6px 14px}
+  button,select{touch-action:manipulation}
+}
+@media (max-width:600px){
+  body{padding:8px;gap:8px}
+  .top{font-size:14px;padding:10px 12px}
+  .bar{padding:0 8px 6px}
+  .ctl{flex-wrap:wrap;justify-content:center}
+  .ctl button{padding:8px 9px}
+  .ctl .sp,#vol,#bVol,#bPrev{display:none}
+  #time{order:10;width:100%;text-align:center;margin:0 0 2px}
+  .cd{flex-wrap:wrap;justify-content:center;white-space:normal;width:92%;bottom:130px}
+}
+</style>
+</head>
+<body>
+<main>
+  <section>
+    <h1 id="title">Nada tocando</h1>
+    <div class="stage">
+      <video id="vid" autoplay playsinline></video>
+      <div class="ui" id="ui">
+        <div class="top" id="topt"></div>
+        <div class="bar">
+          <div class="seek" id="seek"><div class="buf" id="buf"></div><div class="fill" id="fill"></div><div class="knob" id="knob"></div></div>
+          <div class="ctl">
+            <button id="bPrev" title="Anterior">⏮</button>
+            <button id="bBack" title="−10s (J)">⟲</button>
+            <button id="bPlay" title="Play/Pausa (espaço, K)">▶</button>
+            <button id="bFwd" title="+10s (L)">⟳</button>
+            <button id="bNext" title="Próximo">⏭</button>
+            <span id="time">0:00 / 0:00</span>
+            <span class="sp"></span>
+            <button id="bVol" title="Mudo (M)">🔊</button>
+            <input type="range" id="vol" min="0" max="1" step="0.05" value="1" title="Volume">
+            <button id="bLoop" title="Loop">🔁</button>
+            <select id="rate" title="Velocidade">
+              <option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option>
+              <option value="1.25">1.25x</option><option value="1.5">1.5x</option><option value="2">2x</option>
+            </select>
+            <button id="bFs" title="Tela cheia (F)">⛶</button>
+          </div>
+        </div>
+      </div>
+      <div class="cd" id="cd">
+        <span>Próximo em <b id="cdn">10</b>s</span>
+        <button id="rewatch">↺ Quero rever (R)</button>
+        <button id="skipnow">Pular agora</button>
+      </div>
+    </div>
+    <div class="row">
+      <button id="prev">⏮ Anterior</button>
+      <button id="next">⏭ Próximo / Começar</button>
+      <button id="fs" title="Tela cheia (F)">⛶</button>
+      <label><input type="checkbox" id="loop"> Loop</label>
+      <select id="mode">
+        <option value="random">Aleatório</option>
+        <option value="queue">Lista de reprodução</option>
+      </select>
+      <label title="Quantos vídeos precisam tocar antes de um repetir">Bloquear repetição por <input type="number" id="block" min="0" max="50" value="3" style="width:60px"> vídeos</label>
+    </div>
+    <p class="mut" id="status"></p>
+    <p class="mut kbd">Atalhos: espaço/K pausa · J −10s · L +10s · F tela cheia · R rever (durante a contagem)</p>
+  </section>
+</main>
+
+<aside>
+  <section>
+    <details id="setup">
+      <summary><b>Conexão com o Google</b></summary>
+      <div class="row"><input type="text" id="cid" placeholder="Client ID (xxxx.apps.googleusercontent.com)"></div>
+      <div class="row"><button id="login">Entrar com Google</button></div>
+    </details>
+  </section>
+
+  <section>
+    <h2>Pastas</h2>
+    <div class="list" id="folders"></div>
+    <div class="row"><input type="text" id="fin" placeholder="Link ou ID da pasta"><button id="addF">Adicionar</button></div>
+    <div class="row"><button id="refresh" title="Varre as pastas de novo (use quando adicionar vídeos no Drive)">Atualizar lista</button></div>
+  </section>
+
+  <section>
+    <h2>Fila (lista de reprodução)</h2>
+    <div class="list" id="queue"></div>
+    <div class="row"><button id="clearQ">Limpar fila</button></div>
+  </section>
+
+  <section>
+    <h2>Vídeos das pastas marcadas</h2>
+    <div class="list" id="lib" style="max-height:260px"></div>
+  </section>
+</aside>
+
+<script>
+const $ = s => document.querySelector(s);
+const LS = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } };
+const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
+const vid = $('#vid');
+const status = t => $('#status').textContent = t;
+
+let clientId = LS('clientId', ''), folders = LS('folders', []), queue = LS('queue', []), cfg = LS('cfg', { loop: false, mode: 'random', block: 3 }), cache = LS('cache2', {});
+let token = null, tokenExp = 0, videos = [], history = [], recent = [], cur = null, triedBlob = false, blobUrl = null, errs = 0;
+
+// ---------- auth ----------
+let tokenP = null;
+function ensureToken() {
+  if (token && Date.now() < tokenExp - 60000) return Promise.resolve(token);
+  return tokenP ||= askToken().finally(() => { tokenP = null; });
+}
+function askToken() {
+  return new Promise((res, rej) => {
+    if (!clientId) return rej(new Error('Cole o Client ID em "Conexão com o Google".'));
+    if (!window.google) return rej(new Error('Biblioteca do Google não carregou (internet? bloqueador?).'));
+    google.accounts.oauth2.initTokenClient({
+      client_id: clientId,
+      scope: 'https://www.googleapis.com/auth/drive.readonly',
+      callback: r => {
+        if (r.error) return rej(new Error('Login falhou: ' + r.error));
+        token = r.access_token; tokenExp = Date.now() + r.expires_in * 1000; save('consented', true); res(token);
+      },
+      error_callback: e => rej(new Error('Login falhou: ' + (e.type || 'popup bloqueado?')))
+    }).requestAccessToken({ prompt: LS('consented', false) ? '' : 'consent' });
+  });
+}
+
+async function api(path) {
+  const t = await ensureToken();
+  const r = await fetch('https://www.googleapis.com/drive/v3/' + path, { headers: { Authorization: 'Bearer ' + t } });
+  if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 160));
+  return r.json();
+}
+
+// ---------- drive ----------
+const FOLDER = 'application/vnd.google-apps.folder', SHORT = 'application/vnd.google-apps.shortcut';
+const VEXT = /\.(mp4|m4v|webm|mov|mkv|avi|ogv)$/i;
+
+// lista os filhos de várias pastas numa query só
+async function listChildren(ids) {
+  const out = []; let pt = '';
+  const par = ids.map(i => `'${i}' in parents`).join(' or ');
+  do {
+    const q = encodeURIComponent(`(${par}) and trashed=false`);
+    const d = await api(`files?q=${q}&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,size,shortcutDetails(targetId,targetMimeType))&supportsAllDrives=true&includeItemsFromAllDrives=true${pt ? '&pageToken=' + pt : ''}`);
+    out.push(...d.files); pt = d.nextPageToken;
+  } while (pt);
+  return out;
+}
+
+// varre nível por nível: todas as pastas de um nível vão em lotes de 20, em paralelo
+async function loadFolder(f) {
+  const out = [], seen = new Set([f.id]);
+  let level = [f.id];
+  while (level.length) {
+    const chunks = [];
+    for (let i = 0; i < level.length; i += 20) chunks.push(level.slice(i, i + 20));
+    const res = await Promise.all(chunks.map(listChildren));
+    level = [];
+    for (const x of res.flat()) {
+      let id = x.id, mt = x.mimeType;
+      if (mt === SHORT && x.shortcutDetails) { id = x.shortcutDetails.targetId; mt = x.shortcutDetails.targetMimeType; }
+      if (mt === FOLDER) { if (!seen.has(id)) { seen.add(id); level.push(id); } }
+      else if ((mt && mt.startsWith('video/')) || VEXT.test(x.name)) out.push({ id, name: x.name, folder: f.id, size: x.size });
+    }
+    status(`Varrendo "${f.name || f.id}"... ${out.length} vídeos`);
+  }
+  return out;
+}
+
+// force = ignora o cache; only = não chama a API (usado ao abrir a página)
+let loading = null;
+function reload(...a) { return loading = _reload(...a); }
+async function _reload(force, only) {
+  render();
+  const on = folders.filter(f => f.on);
+  if (!on.length) { videos = []; render(); return status('Marque ou adicione uma pasta.'); }
+  const all = []; let missing = false;
+  for (const f of on) {
+    if (!force && cache[f.id]) { all.push(...cache[f.id]); continue; }
+    if (only) { missing = true; continue; }
+    try { cache[f.id] = await loadFolder(f); all.push(...cache[f.id]); }
+    catch (e) { return status('Erro na pasta "' + (f.name || f.id) + '": ' + e.message); }
+  }
+  let warn = '';
+  if (!only) { try { await idbSet('cache', cache); } catch { warn = ' (não consegui salvar a lista pra próxima vez)'; } }
+  const m = new Map(); all.forEach(v => m.set(v.id, v));
+  videos = [...m.values()]; render();
+  status(videos.length + ' vídeos nas pastas marcadas.' + (missing ? ' Tem pasta sem lista: carrego no seu primeiro clique.' : '') + warn);
+}
+
+// ---------- escolha do próximo ----------
+function pickRandom() {
+  const n = Math.min(Math.max(0, +$('#block').value || 0), videos.length - 1);
+  const banned = new Set(n > 0 ? recent.slice(-n) : []);
+  const pool = videos.filter(v => !banned.has(v.id));
+  return pool[Math.floor(Math.random() * pool.length)];
+}
+
+async function next() {
+  if (loading) await loading;
+  if ($('#mode').value === 'queue') {
+    if (!queue.length) return status('A fila está vazia. Adicione vídeos com o botão +.');
+    const i = queue.findIndex(q => q.id === cur?.id);
+    return play(queue[(i + 1) % queue.length]);
+  }
+  if (!videos.length) return status('Nenhum vídeo carregado ainda.');
+  play(pickRandom());
+}
+
+async function play(v, isBack) {
+  if (!v) return;
+  cancelCountdown();
+  if (cur && !isBack) history.push(cur);
+  if (!isBack) recent.push(v.id);
+  cur = v; triedBlob = false;
+  $('#title').textContent = $('#topt').textContent = v.name;
+  try {
+    const t = await ensureToken();
+    vid.loop = $('#loop').checked;
+    vid.src = useSW
+      ? `${new URL('drive-stream/' + v.id, location.href)}?t=${t}&size=${v.size || 0}`
+      : `https://www.googleapis.com/drive/v3/files/${v.id}?alt=media&supportsAllDrives=true&access_token=${t}`;
+    vid.play().catch(() => {});
+  } catch (e) { status(e.message); }
+  render();
+}
+
+// com loop ligado o navegador repete sozinho e não dispara "ended"
+// sem loop: contagem de 10s; se não clicar em "rever", vai pro próximo
+let cdTimer = null;
+function startCountdown() {
+  cancelCountdown();
+  let n = 10;
+  $('#cd').classList.add('on');
+  const tick = () => {
+    $('#cdn').textContent = n;
+    if (n-- <= 0) { cancelCountdown(); next(); }
+  };
+  tick(); cdTimer = setInterval(tick, 1000);
+}
+function cancelCountdown() { clearInterval(cdTimer); cdTimer = null; $('#cd').classList.remove('on'); }
+function rewatch() { cancelCountdown(); vid.currentTime = 0; vid.play().catch(() => {}); }
+vid.onended = startCountdown;
+vid.onplay = cancelCountdown;
+$('#rewatch').onclick = rewatch;
+$('#skipnow').onclick = () => { cancelCountdown(); next(); };
+
+function toggleFs() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $('.stage').requestFullscreen().catch(() => {});
+}
+$('#fs').onclick = toggleFs;
+
+const TYPING = /^(INPUT|SELECT|TEXTAREA)$/;
+document.addEventListener('keydown', e => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (TYPING.test(e.target.tagName) && e.target.type !== 'checkbox') return;
+  const k = e.key.toLowerCase();
+  if (k === ' ' || k === 'k') { e.preventDefault(); vid.paused ? vid.play().catch(() => {}) : vid.pause(); }
+  else if (k === 'j') vid.currentTime = Math.max(0, vid.currentTime - 10);
+  else if (k === 'l') vid.currentTime = Math.min(vid.duration || 1e9, vid.currentTime + 10);
+  else if (k === 'f') toggleFs();
+  else if (k === 'm') vid.muted = !vid.muted;
+  else if (k === 'r' && cdTimer) rewatch();
+});
+// evita que o espaço "aperte" o botão que estiver focado
+document.addEventListener('keyup', e => {
+  if (e.key === ' ' && !(TYPING.test(e.target.tagName) && e.target.type !== 'checkbox')) e.preventDefault();
+});
+vid.onplaying = () => { errs = 0; status(''); };
+vid.onerror = async () => {
+  if (!cur || !vid.getAttribute('src')) return;
+  if (!triedBlob && !vid.src.startsWith('blob:')) {
+    triedBlob = true; status('Streaming direto falhou, baixando o arquivo inteiro...');
+    try {
+      const t = await ensureToken();
+      const r = await fetch(`https://www.googleapis.com/drive/v3/files/${cur.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + t } });
+      if (!r.ok) throw new Error(r.status);
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      blobUrl = URL.createObjectURL(await r.blob());
+      vid.src = blobUrl; vid.play().catch(() => {}); return;
+    } catch {}
+  }
+  if (++errs < 5) { status('Não rodou: ' + cur.name + ' (formato não suportado?). Pulando...'); setTimeout(next, 1500); }
+  else status('Erros demais seguidos, parei. Confere formato/permissão.');
+};
+
+// ---------- UI ----------
+function el(t, p = {}, ...k) { const e = Object.assign(document.createElement(t), p); e.append(...k); return e }
+function item(name, now, ...btns) {
+  return el('div', { className: 'item' + (now ? ' now' : '') }, el('span', { textContent: name, title: name }), ...btns);
+}
+function render() {
+  $('#folders').replaceChildren(...folders.map((f, i) => {
+    const cb = el('input', { type: 'checkbox', checked: f.on, onchange: () => { f.on = cb.checked; save('folders', folders); reload(); } });
+    return el('div', { className: 'item' }, cb, el('span', { textContent: f.name || f.id, title: f.id }),
+      el('button', { textContent: '✕', title: 'Remover pasta', onclick: () => { folders.splice(i, 1); save('folders', folders); reload(); } }));
+  }));
+  $('#lib').replaceChildren(...videos.map(v => item(v.name, cur?.id === v.id,
+    el('button', { textContent: '▶', title: 'Tocar', onclick: () => play(v) }),
+    el('button', { textContent: '+', title: 'Adicionar à fila', onclick: () => { queue.push(v); save('queue', queue); render(); } }))));
+  $('#queue').replaceChildren(...queue.map((v, i) => item(v.name, cur?.id === v.id,
+    el('button', { textContent: '▶', onclick: () => play(v) }),
+    el('button', { textContent: '✕', onclick: () => { queue.splice(i, 1); save('queue', queue); render(); } }))));
+}
+
+$('#addF').onclick = async () => {
+  const m = $('#fin').value.trim().match(/folders\/([\w-]+)|[?&]id=([\w-]+)|^([\w-]{20,})$/);
+  if (!m) return status('Link ou ID de pasta inválido.');
+  const id = m[1] || m[2] || m[3];
+  if (folders.some(f => f.id === id)) return status('Essa pasta já está na lista.');
+  try {
+    const name = (await api(`files/${id}?fields=name&supportsAllDrives=true`)).name;
+    folders.push({ id, name, on: true }); save('folders', folders); $('#fin').value = ''; reload();
+  } catch (e) { status('Não consegui abrir essa pasta: ' + e.message); }
+};
+$('#login').onclick = async () => {
+  clientId = $('#cid').value.trim(); save('clientId', clientId);
+  try { await ensureToken(); status('Conectado.'); reload(); } catch (e) { status(e.message); }
+};
+$('#next').onclick = next;
+$('#prev').onclick = () => { if (history.length) play(history.pop(), true); };
+$('#clearQ').onclick = () => { queue = []; save('queue', queue); render(); };
+$('#loop').onchange = e => { vid.loop = e.target.checked; cfg.loop = e.target.checked; save('cfg', cfg); };
+$('#mode').onchange = e => { cfg.mode = e.target.value; save('cfg', cfg); };
+$('#block').onchange = e => { cfg.block = +e.target.value; save('cfg', cfg); };
+
+// init
+$('#cid').value = clientId; $('#loop').checked = cfg.loop; $('#mode').value = cfg.mode; $('#block').value = cfg.block;
+if (!clientId) $('#setup').open = true;
+$('#refresh').onclick = async () => { try { await reload(true); } catch (e) { status(e.message); } };
+let useSW = false;
+async function swOk() {
+  if (!('serviceWorker' in navigator)) return false;
+  try {
+    await navigator.serviceWorker.register('sw.js');
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller) {
+      await Promise.race([
+        new Promise(r => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true })),
+        new Promise(r => setTimeout(r, 1500))
+      ]);
+    }
+    return !!navigator.serviceWorker.controller;
+  } catch { return false; }
+}
+swOk().then(ok => { useSW = ok; });
+
+// ---------- player customizado ----------
+const stage = $('.stage'), seek = $('#seek');
+const fmt = s => {
+  if (!isFinite(s)) return '0:00';
+  s = Math.floor(s); const h = s / 3600 | 0, m = (s % 3600) / 60 | 0, x = s % 60;
+  return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
+};
+let dragging = false, idleT;
+
+function paint() {
+  const d = vid.duration || 0, p = d ? vid.currentTime / d * 100 : 0;
+  if (!dragging) { $('#fill').style.width = p + '%'; $('#knob').style.left = p + '%'; }
+  const b = vid.buffered;
+  $('#buf').style.width = d && b.length ? b.end(b.length - 1) / d * 100 + '%' : '0';
+  $('#time').textContent = fmt(vid.currentTime) + ' / ' + fmt(d);
+}
+['timeupdate', 'progress', 'loadedmetadata', 'durationchange', 'seeked', 'emptied'].forEach(ev => vid.addEventListener(ev, paint));
+
+function seekAt(e) {
+  const r = seek.getBoundingClientRect(), p = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+  $('#fill').style.width = $('#knob').style.left = p * 100 + '%';
+  if (vid.duration) vid.currentTime = p * vid.duration;
+}
+seek.onpointerdown = e => { dragging = true; seek.classList.add('drag'); seek.setPointerCapture(e.pointerId); seekAt(e); };
+seek.onpointermove = e => { if (dragging) seekAt(e); };
+seek.onpointerup = seek.onpointercancel = () => { dragging = false; seek.classList.remove('drag'); };
+
+const togglePlay = () => vid.paused ? vid.play().catch(() => {}) : vid.pause();
+const syncPlay = () => { $('#bPlay').textContent = vid.paused ? '▶' : '⏸'; };
+['play', 'pause', 'ended', 'emptied'].forEach(ev => vid.addEventListener(ev, syncPlay));
+const coarse = matchMedia('(pointer: coarse)').matches; // true só em tela de toque
+let wasIdle = false;
+stage.addEventListener('pointerdown', () => { wasIdle = stage.classList.contains('idle'); }, true);
+$('#bPlay').onclick = togglePlay;
+vid.onclick = () => { if (coarse && wasIdle) { wasIdle = false; return; } togglePlay(); };
+if (!coarse) vid.ondblclick = toggleFs;
+$('#bFs').onclick = toggleFs;
+$('#bBack').onclick = () => { vid.currentTime = Math.max(0, vid.currentTime - 10); };
+$('#bFwd').onclick = () => { vid.currentTime = Math.min(vid.duration || 1e9, vid.currentTime + 10); };
+$('#bNext').onclick = () => { cancelCountdown(); next(); };
+$('#bPrev').onclick = () => { if (history.length) play(history.pop(), true); };
+
+vid.volume = cfg.vol ?? 1; $('#vol').value = vid.volume;
+$('#vol').oninput = e => { vid.volume = +e.target.value; vid.muted = vid.volume === 0; cfg.vol = vid.volume; save('cfg', cfg); };
+$('#bVol').onclick = () => { vid.muted = !vid.muted; };
+vid.addEventListener('volumechange', () => {
+  $('#bVol').textContent = vid.muted || vid.volume === 0 ? '🔇' : vid.volume < .5 ? '🔉' : '🔊';
+  $('#vol').value = vid.muted ? 0 : vid.volume;
+});
+$('#rate').onchange = e => { vid.defaultPlaybackRate = vid.playbackRate = +e.target.value; };
+
+const syncLoop = () => $('#bLoop').classList.toggle('on', $('#loop').checked);
+$('#bLoop').onclick = () => $('#loop').click();
+$('#loop').addEventListener('change', syncLoop); syncLoop();
+
+// controles somem sozinhos depois de 2,5s tocando
+function poke() {
+  stage.classList.remove('idle'); clearTimeout(idleT);
+  if (!vid.paused && !vid.ended) idleT = setTimeout(() => stage.classList.add('idle'), 2500);
+}
+['mousemove', 'pointerdown'].forEach(ev => stage.addEventListener(ev, poke));
+document.addEventListener('keydown', poke);
+['play', 'pause', 'ended'].forEach(ev => vid.addEventListener(ev, poke));
+
+// só em tela de toque: não deixa a tela apagar tocando e gira em tela cheia
+if (coarse) {
+  let wl = null;
+  const lock = async () => {
+    try {
+      if (!wl && 'wakeLock' in navigator) { wl = await navigator.wakeLock.request('screen'); wl.addEventListener('release', () => { wl = null; }); }
+    } catch {}
+  };
+  vid.addEventListener('play', lock);
+  ['pause', 'ended'].forEach(ev => vid.addEventListener(ev, () => { if (wl) wl.release(); }));
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !vid.paused) lock(); });
+  document.addEventListener('fullscreenchange', () => {
+    if (!screen.orientation || !screen.orientation.lock) return;
+    if (document.fullscreenElement) screen.orientation.lock(vid.videoHeight > vid.videoWidth ? 'portrait' : 'landscape').catch(() => {});
+    else screen.orientation.unlock();
+  });
+}
+const idb = () => new Promise((res, rej) => {
+  const r = indexedDB.open('drive-player', 1);
+  r.onupgradeneeded = () => r.result.createObjectStore('kv');
+  r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+});
+async function idbGet(k) {
+  try {
+    const db = await idb();
+    return await new Promise(res => { const q = db.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result); q.onerror = () => res(undefined); });
+  } catch { return undefined; }
+}
+async function idbSet(k, v) {
+  const db = await idb();
+  return new Promise((res, rej) => { const t = db.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = () => rej(t.error); });
+}
+
+render();
+(async () => {
+  const c = await idbGet('cache'); if (c) cache = c;
+  await reload(false, true);
+  // se alguma pasta marcada ainda não tem lista, varre sozinho no primeiro clique (precisa de um clique pro login abrir)
+  if (folders.some(f => f.on && !cache[f.id])) {
+    document.addEventListener('click', () => reload(), { once: true, capture: true });
+  }
+})();
+</script>
+</body>
+</html>
