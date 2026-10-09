@@ -95,7 +95,7 @@ details summary{cursor:pointer}
             <button id="bBack" title="−10s (J)">⟲</button>
             <button id="bPlay" title="Play/Pausa (espaço, K)">▶</button>
             <button id="bFwd" title="+10s (L)">⟳</button>
-            <button id="bNext" title="Próximo">⏭</button>
+            <button id="bNext" title="Próximo vídeo (N)">⏭</button>
             <span id="time">0:00 / 0:00</span>
             <span class="sp"></span>
             <button id="bVol" title="Mudo (M)">🔊</button>
@@ -112,7 +112,7 @@ details summary{cursor:pointer}
       <div class="cd" id="cd">
         <span>Próximo em <b id="cdn">10</b>s</span>
         <button id="rewatch">↺ Quero rever (R)</button>
-        <button id="skipnow">Pular agora</button>
+        <button id="skipnow">Continuar (N)</button>
       </div>
     </div>
     <div class="row">
@@ -127,7 +127,7 @@ details summary{cursor:pointer}
       <label title="Quantos vídeos precisam tocar antes de um repetir">Bloquear repetição por <input type="number" id="block" min="0" max="50" value="3" style="width:60px"> vídeos</label>
     </div>
     <p class="mut" id="status"></p>
-    <p class="mut kbd">Atalhos: espaço/K pausa · J −10s · L +10s · F tela cheia · R rever (durante a contagem)</p>
+    <p class="mut kbd">Atalhos: espaço/K pausa · J −10s · L +10s · F tela cheia · R rever (na contagem) · N próximo vídeo</p>
   </section>
 </main>
 
@@ -329,6 +329,7 @@ document.addEventListener('keydown', e => {
   else if (k === 'f') toggleFs();
   else if (k === 'm') vid.muted = !vid.muted;
   else if (k === 'r' && cdTimer) rewatch();
+  else if (k === 'n') { cancelCountdown(); next(); }
 });
 // evita que o espaço "aperte" o botão que estiver focado
 document.addEventListener('keyup', e => {
