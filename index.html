@@ -58,6 +58,11 @@ details summary{cursor:pointer}
 #time{font-variant-numeric:tabular-nums;font-size:13px;margin-left:8px;text-shadow:0 1px 3px #000}
 #vol{width:84px;padding:0;border:0;background:none;accent-color:var(--ac)}
 #rate{font-size:13px;padding:3px 4px;background:rgba(0,0,0,.45);color:#fff}
+#volp{font-size:12px;min-width:38px;text-shadow:0 1px 3px #000}
+.spin{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;flex-direction:column;align-items:center;gap:10px;pointer-events:none;color:#fff;text-shadow:0 1px 4px #000;font-size:14px}
+.spin.on{display:flex}
+.spin i{width:48px;height:48px;border-radius:50%;border:4px solid rgba(255,255,255,.25);border-top-color:var(--ac);animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
 @media (pointer:coarse){
   .kbd{display:none}
   .ctl button{font-size:24px;padding:8px 12px}
@@ -74,7 +79,7 @@ details summary{cursor:pointer}
   .bar{padding:0 8px 6px}
   .ctl{flex-wrap:wrap;justify-content:center}
   .ctl button{padding:8px 9px}
-  .ctl .sp,#vol,#bVol,#bPrev{display:none}
+  .ctl .sp,#vol,#volp,#bVol,#bPrev{display:none}
   #time{order:10;width:100%;text-align:center;margin:0 0 2px}
   .cd{flex-wrap:wrap;justify-content:center;white-space:normal;width:92%;bottom:130px}
 }
@@ -99,7 +104,7 @@ details summary{cursor:pointer}
             <span id="time">0:00 / 0:00</span>
             <span class="sp"></span>
             <button id="bVol" title="Mudo (M)">🔊</button>
-            <input type="range" id="vol" min="0" max="1" step="0.05" value="1" title="Volume">
+            <input type="range" id="vol" min="0" max="2" step="0.05" value="1" title="Volume (acima de 100% pode distorcer)"><span id="volp">100%</span>
             <button id="bLoop" title="Loop">🔁</button>
             <select id="rate" title="Velocidade">
               <option value="0.5">0.5x</option><option value="0.75">0.75x</option><option value="1" selected>1x</option>
@@ -109,6 +114,7 @@ details summary{cursor:pointer}
           </div>
         </div>
       </div>
+      <div class="spin" id="spin"><i></i><span id="spTxt">Carregando…</span></div>
       <div class="cd" id="cd">
         <span>Próximo em <b id="cdn">10</b>s</span>
         <button id="rewatch">↺ Quero rever (R)</button>
@@ -136,7 +142,7 @@ details summary{cursor:pointer}
     <details id="setup">
       <summary><b>Conexão com o Google</b></summary>
       <div class="row"><input type="text" id="cid" placeholder="Client ID (xxxx.apps.googleusercontent.com)"></div>
-      <div class="row"><button id="login">Entrar com Google</button></div>
+      <div class="row"><button id="login">Entrar com Google</button><button id="cfgLink" title="Copia um link com seu Client ID e suas pastas. Abra ele em outro aparelho.">Copiar link pro celular</button></div>
     </details>
   </section>
 
@@ -167,7 +173,8 @@ const vid = $('#vid');
 const status = t => $('#status').textContent = t;
 
 let clientId = LS('clientId', ''), folders = LS('folders', []), queue = LS('queue', []), cfg = LS('cfg', { loop: false, mode: 'random', block: 3 }), cache = LS('cache2', {});
-let token = null, tokenExp = 0, videos = [], history = [], recent = [], cur = null, triedBlob = false, blobUrl = null, errs = 0;
+const _tk = LS('tok', {});
+let token = _tk.t || null, tokenExp = _tk.e || 0, videos = [], history = [], recent = [], cur = null, triedBlob = false, blobUrl = null, errs = 0;
 
 // ---------- auth ----------
 let tokenP = null;
@@ -184,16 +191,17 @@ function askToken() {
       scope: 'https://www.googleapis.com/auth/drive.readonly',
       callback: r => {
         if (r.error) return rej(new Error('Login falhou: ' + r.error));
-        token = r.access_token; tokenExp = Date.now() + r.expires_in * 1000; save('consented', true); res(token);
+        token = r.access_token; tokenExp = Date.now() + r.expires_in * 1000; save('consented', true); save('tok', { t: token, e: tokenExp }); res(token);
       },
       error_callback: e => rej(new Error('Login falhou: ' + (e.type || 'popup bloqueado?')))
     }).requestAccessToken({ prompt: LS('consented', false) ? '' : 'consent' });
   });
 }
 
-async function api(path) {
+async function api(path, retry) {
   const t = await ensureToken();
   const r = await fetch('https://www.googleapis.com/drive/v3/' + path, { headers: { Authorization: 'Bearer ' + t } });
+  if (r.status === 401 && !retry) { token = null; tokenExp = 0; save('tok', {}); return api(path, true); }
   if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 160));
   return r.json();
 }
@@ -339,7 +347,7 @@ vid.onplaying = () => { errs = 0; status(''); };
 vid.onerror = async () => {
   if (!cur || !vid.getAttribute('src')) return;
   if (!triedBlob && !vid.src.startsWith('blob:')) {
-    triedBlob = true; status('Streaming direto falhou, baixando o arquivo inteiro...');
+    triedBlob = true; status('Streaming direto falhou, baixando o arquivo inteiro...'); busy(true, 'Baixando o arquivo inteiro…');
     try {
       const t = await ensureToken();
       const r = await fetch(`https://www.googleapis.com/drive/v3/files/${cur.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + t } });
@@ -350,7 +358,7 @@ vid.onerror = async () => {
     } catch {}
   }
   if (++errs < 5) { status('Não rodou: ' + cur.name + ' (formato não suportado?). Pulando...'); setTimeout(next, 1500); }
-  else status('Erros demais seguidos, parei. Confere formato/permissão.');
+  else { busy(false); status('Erros demais seguidos, parei. Confere formato/permissão.'); }
 };
 
 // ---------- UI ----------
@@ -394,6 +402,24 @@ $('#mode').onchange = e => { cfg.mode = e.target.value; save('cfg', cfg); };
 $('#block').onchange = e => { cfg.block = +e.target.value; save('cfg', cfg); };
 
 // init
+// link de configuração: leva Client ID + pastas pra outro aparelho (fica só no # do link, não vai pro servidor)
+function importCfg() {
+  const m = location.hash.match(/^#cfg=(.+)$/);
+  if (!m) return;
+  try {
+    const d = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(decodeURIComponent(m[1])), c => c.charCodeAt(0))));
+    if (d.c) { clientId = d.c; save('clientId', clientId); }
+    if (Array.isArray(d.f)) { folders = d.f; save('folders', folders); }
+    window.history.replaceState(null, '', location.pathname + location.search);
+  } catch {}
+}
+$('#cfgLink').onclick = async () => {
+  const json = JSON.stringify({ c: clientId, f: folders.map(f => ({ id: f.id, name: f.name, on: f.on })) });
+  const link = location.origin + location.pathname + '#cfg=' + encodeURIComponent(btoa(String.fromCharCode(...new TextEncoder().encode(json))));
+  try { await navigator.clipboard.writeText(link); status('Link copiado! Manda pro seu celular e abre lá.'); }
+  catch { prompt('Copie este link e abra no outro aparelho:', link); }
+};
+importCfg();
 $('#cid').value = clientId; $('#loop').checked = cfg.loop; $('#mode').value = cfg.mode; $('#block').value = cfg.block;
 if (!clientId) $('#setup').open = true;
 $('#refresh').onclick = async () => { try { await reload(true); } catch (e) { status(e.message); } };
@@ -456,13 +482,37 @@ $('#bFwd').onclick = () => { vid.currentTime = Math.min(vid.duration || 1e9, vid
 $('#bNext').onclick = () => { cancelCountdown(); next(); };
 $('#bPrev').onclick = () => { if (history.length) play(history.pop(), true); };
 
-vid.volume = cfg.vol ?? 1; $('#vol').value = vid.volume;
-$('#vol').oninput = e => { vid.volume = +e.target.value; vid.muted = vid.volume === 0; cfg.vol = vid.volume; save('cfg', cfg); };
-$('#bVol').onclick = () => { vid.muted = !vid.muted; };
-vid.addEventListener('volumechange', () => {
-  $('#bVol').textContent = vid.muted || vid.volume === 0 ? '🔇' : vid.volume < .5 ? '🔉' : '🔊';
-  $('#vol').value = vid.muted ? 0 : vid.volume;
-});
+// volume de 0 a 200%: até 100% é o volume normal do vídeo; acima disso entra um amplificador (Web Audio)
+let vol = Math.min(2, Math.max(0, cfg.vol ?? 1)), actx = null, gain = null;
+function showVol() {
+  const v = vid.muted ? 0 : vol;
+  $('#bVol').textContent = v === 0 ? '🔇' : v < .5 ? '🔉' : '🔊';
+  $('#vol').value = v; $('#volp').textContent = Math.round(v * 100) + '%';
+}
+function applyVol() {
+  if (vol > 1 && !gain) {
+    // o amplificador só funciona se o vídeo vier da mesma origem (service worker); senão o navegador silencia o áudio
+    if (!useSW) { vol = 1; status('Volume acima de 100% só funciona com o streaming pelo service worker ativo.'); }
+    else {
+      try {
+        actx = new (window.AudioContext || window.webkitAudioContext)();
+        gain = actx.createGain();
+        const lim = actx.createDynamicsCompressor(); // limitador pra segurar os picos e distorcer menos
+        lim.threshold.value = -2; lim.knee.value = 0; lim.ratio.value = 20; lim.attack.value = .002; lim.release.value = .1;
+        actx.createMediaElementSource(vid).connect(gain); gain.connect(lim); lim.connect(actx.destination);
+      } catch { vol = 1; actx = gain = null; }
+    }
+  }
+  vid.volume = Math.min(1, vol);
+  if (gain) { gain.gain.value = Math.max(1, vol); actx.resume().catch(() => {}); }
+  showVol();
+}
+function setVol(v) { vol = Math.min(2, Math.max(0, v)); vid.muted = vol === 0; cfg.vol = vol; save('cfg', cfg); applyVol(); }
+vid.volume = Math.min(1, vol); showVol();
+$('#vol').oninput = e => setVol(+e.target.value);
+$('#bVol').onclick = () => { vid.muted = !vid.muted; showVol(); };
+vid.addEventListener('volumechange', showVol);
+vid.addEventListener('play', () => { if (vol > 1) applyVol(); }); // volume acima de 100% salvo: liga quando começar a tocar
 $('#rate').onchange = e => { vid.defaultPlaybackRate = vid.playbackRate = +e.target.value; };
 
 const syncLoop = () => $('#bLoop').classList.toggle('on', $('#loop').checked);
@@ -477,6 +527,20 @@ function poke() {
 ['mousemove', 'pointerdown'].forEach(ev => stage.addEventListener(ev, poke));
 document.addEventListener('keydown', poke);
 ['play', 'pause', 'ended'].forEach(ev => vid.addEventListener(ev, poke));
+
+// indicador de carregando: aparece se o vídeo travar esperando dados (internet lenta, download em paralelo...)
+const spin = $('#spin');
+let spT, slowT;
+function busy(on, txt) {
+  clearTimeout(spT); clearTimeout(slowT);
+  if (!on) { spin.classList.remove('on'); return; }
+  $('#spTxt').textContent = txt || 'Carregando…';
+  spT = setTimeout(() => spin.classList.add('on'), 300); // atraso curto pra não piscar em pulos rápidos
+  if (!txt) slowT = setTimeout(() => { $('#spTxt').textContent = 'Conexão lenta, aguardando dados…'; }, 8000);
+}
+['waiting', 'seeking', 'loadstart'].forEach(ev => vid.addEventListener(ev, () => busy(true)));
+['playing', 'canplay', 'seeked', 'pause', 'ended', 'emptied'].forEach(ev => vid.addEventListener(ev, () => busy(false)));
+vid.addEventListener('timeupdate', () => { if (vid.readyState >= 3 && !vid.seeking) busy(false); });
 
 // só em tela de toque: não deixa a tela apagar tocando e gira em tela cheia
 if (coarse) {
