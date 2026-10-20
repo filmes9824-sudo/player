@@ -140,6 +140,7 @@ details.dir .grid{margin-top:8px}
       <button id="next">⏭ Próximo / Começar</button>
       <button id="fs" title="Tela cheia (F)">⛶</button>
       <label><input type="checkbox" id="loop"> Loop</label>
+      <label title="Baixa o próximo vídeo enquanto o atual toca (gasta mais internet)"><input type="checkbox" id="pre"> Pré-carregar o próximo</label>
       <select id="mode">
         <option value="random">Aleatório</option>
         <option value="queue">Lista de reprodução</option>
@@ -302,32 +303,97 @@ function pickRandom() {
 
 async function next() {
   if (loading) await loading;
+  const q = $('#mode').value === 'queue';
+  if (q && !queue.length) return status('A fila está vazia. Adicione vídeos com o botão +.');
+  if (!q && !pool().length) return status('Nenhum vídeo disponível (nada carregado ou tudo excluído).');
+  const v = nextVideo();
+  if (!v) return status(q ? 'Todos os vídeos da fila estão excluídos.' : 'Não achei vídeo pra tocar.');
+  play(v);
+}
+
+// ---------- download (sem streaming): baixa o arquivo inteiro e toca de um blob ----------
+const jobs = new Map(), PRE_MAX = 1.5e9;
+let playSeq = 0, curStarted = false, backPlay = false, preV = null, lastQ = null;
+const mime = (n, t) => t && t.startsWith('video/') ? t : /\.webm$/i.test(n) ? 'video/webm' : /\.mkv$/i.test(n) ? 'video/x-matroska' : /\.mov$/i.test(n) ? 'video/quicktime' : 'video/mp4';
+
+function fetchJob(v, onProg) {
+  let j = jobs.get(v.id);
+  if (j) { if (onProg) j.onProg = onProg; return j; }
+  const ctl = new AbortController();
+  j = { v, ctl, url: null, got: 0, total: +v.size || 0, onProg };
+  j.p = (async () => {
+    const t = await ensureToken();
+    const r = await fetch(`https://www.googleapis.com/drive/v3/files/${v.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + t }, signal: ctl.signal });
+    if (!r.ok) throw new Error('Drive respondeu ' + r.status);
+    j.total = +r.headers.get('Content-Length') || j.total;
+    const chunks = [], rd = r.body.getReader();
+    for (;;) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      chunks.push(value); j.got += value.length;
+      if (j.onProg) j.onProg(j);
+    }
+    j.url = URL.createObjectURL(new Blob(chunks, { type: mime(v.name, r.headers.get('Content-Type')) }));
+    return j.url;
+  })();
+  j.p.catch(() => { if (jobs.get(v.id) === j) jobs.delete(v.id); });
+  jobs.set(v.id, j);
+  return j;
+}
+function dropJob(id) { const j = jobs.get(id); if (!j) return; j.ctl.abort(); if (j.url) URL.revokeObjectURL(j.url); jobs.delete(id); }
+function keepJobs(...ids) { [...jobs.keys()].forEach(id => ids.includes(id) || dropJob(id)); }
+
+function peekNext() { // qual vai ser o próximo, sem tocar
   if ($('#mode').value === 'queue') {
-    if (!queue.length) return status('A fila está vazia. Adicione vídeos com o botão +.');
     const i = queue.findIndex(q => q.id === cur?.id);
-    for (let k = 1; k <= queue.length; k++) { const q = queue[(i + k) % queue.length]; if (!isBanned(q)) return play(q); }
-    return status('Todos os vídeos da fila estão excluídos.');
+    for (let k = 1; k <= queue.length; k++) { const q = queue[(i + k) % queue.length]; if (!isBanned(q)) return q; }
+    return null;
   }
-  if (!pool().length) return status('Nenhum vídeo disponível (nada carregado ou tudo excluído).');
-  play(pickRandom());
+  return pickRandom();
+}
+function nextVideo() {
+  if ($('#mode').value === 'queue') return peekNext();
+  const v = preV && !isBanned(preV) && preV.id !== cur?.id ? preV : null;
+  preV = null;
+  return v || peekNext();
+}
+function prefetch() { // baixa o próximo em segundo plano enquanto o atual toca
+  if (!$('#pre').checked || !cur || !(token && Date.now() < tokenExp - 120000)) return;
+  const v = peekNext();
+  if (!v || v.id === cur.id || (+v.size || 0) > PRE_MAX) { preV = null; keepJobs(cur.id); return; }
+  preV = v; fetchJob(v); keepJobs(cur.id, v.id);
+}
+function fail(msg, seq) {
+  dl = false; busy(false);
+  if (++errs < 5) { status(msg + ' Pulando...'); setTimeout(() => { if (seq === playSeq) next(); }, 1500); }
+  else status('Erros demais seguidos, parei. ' + msg);
 }
 
 async function play(v, isBack) {
   if (!v) return;
   cancelCountdown();
-  if (cur && !isBack) history.push(cur);
-  if (!isBack) recent.push(v.id);
-  cur = v; triedBlob = false;
+  const seq = ++playSeq; // qualquer coisa assíncrona de um vídeo antigo é ignorada se esse número mudou
+  if (cur && curStarted && !isBack) { history.push(cur); if (history.length > 100) history.shift(); }
+  cur = v; curStarted = false; backPlay = !!isBack;
   $('#title').textContent = $('#topt').textContent = v.name;
-  try {
-    const t = await ensureToken();
-    vid.loop = $('#loop').checked;
-    vid.src = useSW
-      ? `${new URL('drive-stream/' + v.id, location.href)}?t=${t}&size=${v.size || 0}`
-      : `https://www.googleapis.com/drive/v3/files/${v.id}?alt=media&supportsAllDrives=true&access_token=${t}`;
-    vid.play().catch(() => {});
-  } catch (e) { status(e.message); }
+  vid.pause();
+  keepJobs(v.id, preV && preV.id); // cancela o download do vídeo que você largou
   render();
+  const j = fetchJob(v, x => { if (seq === playSeq) progress(x); });
+  try {
+    if (!j.url) { dl = true; progress(j); }
+    const url = await j.p;
+    if (seq !== playSeq) return;
+    dl = false; busy(false);
+    vid.loop = $('#loop').checked;
+    vid.src = url;
+    vid.play().catch(() => {});
+  } catch (e) {
+    if (seq !== playSeq) return;
+    dl = false; busy(false);
+    if (/login|client id|google/i.test(e.message)) return status(e.message + ' Clique em Próximo pra tentar de novo.');
+    fail('Falhou ao baixar "' + v.name + '" (' + e.message + ').', seq);
+  }
 }
 
 // com loop ligado o navegador repete sozinho e não dispara "ended"
@@ -373,23 +439,15 @@ document.addEventListener('keydown', e => {
 document.addEventListener('keyup', e => {
   if (e.key === ' ' && !(TYPING.test(e.target.tagName) && e.target.type !== 'checkbox')) e.preventDefault();
 });
-vid.onplaying = () => { errs = 0; status(''); };
-vid.onerror = async () => {
-  if (!cur || !vid.getAttribute('src')) return;
-  if (!triedBlob && !vid.src.startsWith('blob:')) {
-    triedBlob = true; status('Streaming direto falhou, baixando o arquivo inteiro...'); busy(true, 'Baixando o arquivo inteiro…');
-    try {
-      const t = await ensureToken();
-      const r = await fetch(`https://www.googleapis.com/drive/v3/files/${cur.id}?alt=media&supportsAllDrives=true`, { headers: { Authorization: 'Bearer ' + t } });
-      if (!r.ok) throw new Error(r.status);
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
-      blobUrl = URL.createObjectURL(await r.blob());
-      vid.src = blobUrl; vid.play().catch(() => {}); return;
-    } catch {}
+vid.onplaying = () => {
+  errs = 0; status('');
+  if (cur && !curStarted) { // primeira vez que ESTE vídeo realmente começou a tocar
+    curStarted = true;
+    if (!backPlay) { recent.push(cur.id); if (recent.length > 500) recent.splice(0, recent.length - 500); }
+    prefetch();
   }
-  if (++errs < 5) { status('Não rodou: ' + cur.name + ' (formato não suportado?). Pulando...'); setTimeout(next, 1500); }
-  else { busy(false); status('Erros demais seguidos, parei. Confere formato/permissão.'); }
 };
+vid.onerror = () => { if (cur && vid.getAttribute('src')) fail('Formato não suportado: "' + cur.name + '".', playSeq); };
 
 // ---------- exclusões, miniaturas e visualização por pasta ----------
 const saveBan = () => save('ban', ban);
@@ -516,19 +574,28 @@ function renderLib() {
   if (!parts.length) parts.push(el('p', { className: 'mut', textContent: 'Nada por aqui (ou tudo excluído).' }));
   L.replaceChildren(...parts);
 }
+let sameKey = '';
 function renderSame() {
   const sec = $('#sameSec');
-  if (!cur) { sec.style.display = 'none'; return; }
+  if (!cur) { sec.style.display = 'none'; sameKey = ''; return; }
   sec.style.display = '';
-  const pid = cur.parent || cur.folder, path = dirPath(pid) || pid;
-  const sib = videos.filter(v => (v.parent || v.folder) === pid && v.id !== cur.id && !isBanned(v));
-  $('#sameT').textContent = `📁 ${path} · mais ${sib.length} vídeo(s) nesta pasta`;
+  const pid = cur.parent || cur.folder;
+  const all = videos.filter(v => (v.parent || v.folder) === pid && !isBanned(v)).sort((a, b) => natural(a.name, b.name));
+  if (!all.some(v => v.id === cur.id)) all.unshift(cur);
+  const key = pid + '|' + all.map(v => v.id).join(',');
+  if (key === sameKey) return; // mesma pasta, mesmos vídeos: só o destaque muda
+  sameKey = key;
+  $('#sameT').textContent = `📁 ${dirPath(pid) || pid} · ${all.length} vídeo(s) (o que está tocando fica destacado)`;
   $('#sameAct').replaceChildren(
     el('button', { textContent: '🚫 Excluir este vídeo', onclick: () => banVideo(cur) }),
-    el('button', { textContent: '🚫 Excluir esta pasta', onclick: () => banFolder(pid) }),
-    el('button', { textContent: '📂 Ver no explorador', onclick: () => { go(pid); $('#exSec').scrollIntoView({ behavior: 'smooth' }); } }),
-    el('button', { textContent: '+ Pasta toda na fila', onclick: () => { sib.forEach(v => queue.push(v)); save('queue', queue); render(); } }));
-  $('#same').replaceChildren(...sib.map(card));
+    el('button', { textContent: '🚫 Excluir esta pasta', onclick: () => banFolder(cur.parent || cur.folder) }),
+    el('button', { textContent: '📂 Ver no explorador', onclick: () => { go(cur.parent || cur.folder); $('#exSec').scrollIntoView({ behavior: 'smooth' }); } }),
+    el('button', { textContent: '+ Pasta toda na fila', onclick: () => {
+      const p = cur.parent || cur.folder, have = new Set(queue.map(q => q.id));
+      videos.filter(v => (v.parent || v.folder) === p && !isBanned(v) && !have.has(v.id)).forEach(v => queue.push(v));
+      save('queue', queue); render();
+    } }));
+  $('#same').replaceChildren(...all.map(card));
 }
 function renderBan() {
   const nm = x => typeof x === 'string' ? x : x.n;
@@ -561,9 +628,17 @@ function render() {
       el('button', { textContent: '✕', title: 'Remover pasta', onclick: () => { folders.splice(i, 1); save('folders', folders); reload(); } }));
   }));
   renderSame(); markNow(); renderBan();
-  $('#queue').replaceChildren(...queue.map((v, i) => withThumb(v, item(v.name, cur?.id === v.id,
-    el('button', { textContent: '▶', onclick: () => play(v) }),
-    el('button', { textContent: '✕', onclick: () => { queue.splice(i, 1); save('queue', queue); render(); } })))));
+  const qk = queue.map(q => q.id).join(',');
+  if (qk !== lastQ) {
+    lastQ = qk;
+    $('#queue').replaceChildren(...queue.map((v, i) => {
+      const r = withThumb(v, item(v.name, false,
+        el('button', { textContent: '▶', onclick: () => play(v) }),
+        el('button', { textContent: '✕', onclick: () => { queue.splice(i, 1); save('queue', queue); render(); } })));
+      r.dataset.id = v.id; return r;
+    }));
+  }
+  document.querySelectorAll('#queue .item').forEach(r => r.classList.toggle('now', !!cur && r.dataset.id === cur.id));
 }
 
 $('#addF').onclick = async () => {
@@ -608,24 +683,12 @@ $('#cfgLink').onclick = async () => {
 };
 importCfg();
 $('#cid').value = clientId; $('#loop').checked = cfg.loop; $('#mode').value = cfg.mode; $('#block').value = cfg.block;
+$('#pre').checked = cfg.pre ?? !matchMedia('(pointer: coarse)').matches;
+$('#pre').onchange = () => { cfg.pre = $('#pre').checked; save('cfg', cfg); if (cfg.pre) prefetch(); else { preV = null; keepJobs(cur && cur.id); } };
 if (!clientId) $('#setup').open = true;
 $('#refresh').onclick = async () => { try { await reload(true); } catch (e) { status(e.message); } };
-let useSW = false;
-async function swOk() {
-  if (!('serviceWorker' in navigator)) return false;
-  try {
-    await navigator.serviceWorker.register('sw.js');
-    await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller) {
-      await Promise.race([
-        new Promise(r => navigator.serviceWorker.addEventListener('controllerchange', r, { once: true })),
-        new Promise(r => setTimeout(r, 1500))
-      ]);
-    }
-    return !!navigator.serviceWorker.controller;
-  } catch { return false; }
-}
-swOk().then(ok => { useSW = ok; });
+// o streaming por service worker foi removido; desregistra o antigo se existir
+if ('serviceWorker' in navigator) navigator.serviceWorker.getRegistrations().then(rs => rs.forEach(r => r.unregister())).catch(() => {});
 
 // ---------- player customizado ----------
 const stage = $('.stage'), seek = $('#seek');
@@ -679,8 +742,7 @@ function showVol() {
 function applyVol() {
   if (vol > 1 && !gain) {
     // o amplificador só funciona se o vídeo vier da mesma origem (service worker); senão o navegador silencia o áudio
-    if (!useSW) { vol = 1; status('Volume acima de 100% só funciona com o streaming pelo service worker ativo.'); }
-    else {
+    {
       try {
         actx = new (window.AudioContext || window.webkitAudioContext)();
         gain = actx.createGain();
@@ -717,7 +779,7 @@ document.addEventListener('keydown', poke);
 
 // indicador de carregando: aparece se o vídeo travar esperando dados (internet lenta, download em paralelo...)
 const spin = $('#spin');
-let spT, slowT;
+let spT, slowT, dl = false;
 function busy(on, txt) {
   clearTimeout(spT); clearTimeout(slowT);
   if (!on) { spin.classList.remove('on'); return; }
@@ -725,9 +787,17 @@ function busy(on, txt) {
   spT = setTimeout(() => spin.classList.add('on'), 300); // atraso curto pra não piscar em pulos rápidos
   if (!txt) slowT = setTimeout(() => { $('#spTxt').textContent = 'Conexão lenta, aguardando dados…'; }, 8000);
 }
-['waiting', 'seeking', 'loadstart'].forEach(ev => vid.addEventListener(ev, () => busy(true)));
-['playing', 'canplay', 'seeked', 'pause', 'ended', 'emptied'].forEach(ev => vid.addEventListener(ev, () => busy(false)));
-vid.addEventListener('timeupdate', () => { if (vid.readyState >= 3 && !vid.seeking) busy(false); });
+['waiting', 'seeking', 'loadstart'].forEach(ev => vid.addEventListener(ev, () => { if (!dl) busy(true); }));
+['playing', 'canplay', 'seeked', 'pause', 'ended', 'emptied'].forEach(ev => vid.addEventListener(ev, () => { if (!dl) busy(false); }));
+vid.addEventListener('timeupdate', () => { if (!dl && vid.readyState >= 3 && !vid.seeking) busy(false); });
+const mb = n => (n / 1048576).toFixed(n > 1e9 ? 0 : 1);
+function progress(j) {
+  const now = performance.now();
+  if (now - (progress.t || 0) < 150 && j.got < j.total) return;
+  progress.t = now;
+  $('#spTxt').textContent = `Baixando ${j.total ? Math.floor(j.got / j.total * 100) + '% · ' : ''}${mb(j.got)}${j.total ? ' / ' + mb(j.total) : ''} MB`;
+  clearTimeout(slowT); spin.classList.add('on');
+}
 
 // só em tela de toque: não deixa a tela apagar tocando e gira em tela cheia
 if (coarse) {
