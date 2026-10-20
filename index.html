@@ -59,6 +59,20 @@ details summary{cursor:pointer}
 #vol{width:84px;padding:0;border:0;background:none;accent-color:var(--ac)}
 #rate{font-size:13px;padding:3px 4px;background:rgba(0,0,0,.45);color:#fff}
 #volp{font-size:12px;min-width:38px;text-shadow:0 1px 3px #000}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.card{background:#12141b;border:1px solid var(--bd);border-radius:8px;overflow:hidden;display:flex;flex-direction:column}
+.card.now{border-color:var(--ac)}
+.card .th{aspect-ratio:16/9;background:#0b0c10;display:flex;align-items:center;justify-content:center;font-size:28px;cursor:pointer}
+.bt input{flex:none;width:18px;height:18px;align-self:center}
+.th img,.sm img{width:100%;height:100%;object-fit:cover;display:block}
+.card .nm{padding:5px 8px;font-size:12px;line-height:1.3;height:34px;overflow:hidden}
+.card .bt{display:flex;gap:4px;padding:0 6px 6px}
+.card .bt button{flex:1;padding:3px 0;font-size:13px}
+details.dir{border:1px solid var(--bd);border-radius:8px;margin-bottom:8px;padding:6px 10px}
+details.dir summary{display:flex;gap:8px;align-items:center;cursor:pointer}
+details.dir summary span{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+details.dir .grid{margin-top:8px}
+.sm{width:56px;height:32px;flex:none;border-radius:4px;overflow:hidden;background:#0b0c10;display:flex;align-items:center;justify-content:center;font-size:14px}
 .spin{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:none;flex-direction:column;align-items:center;gap:10px;pointer-events:none;color:#fff;text-shadow:0 1px 4px #000;font-size:14px}
 .spin.on{display:flex}
 .spin i{width:48px;height:48px;border-radius:50%;border:4px solid rgba(255,255,255,.25);border-top-color:var(--ac);animation:sp .8s linear infinite}
@@ -135,6 +149,17 @@ details summary{cursor:pointer}
     <p class="mut" id="status"></p>
     <p class="mut kbd">Atalhos: espaço/K pausa · J −10s · L +10s · F tela cheia · R rever (na contagem) · N próximo vídeo</p>
   </section>
+  <section id="sameSec" style="display:none">
+    <h2 id="sameT">Nesta pasta</h2>
+    <div class="row" id="sameAct" style="margin:0 0 8px"></div>
+    <div class="grid" id="same"></div>
+  </section>
+  <section id="exSec">
+    <h2>Explorador de pastas</h2>
+    <div class="row" id="crumb" style="margin:0 0 8px"></div>
+    <div class="row" id="exTools" style="margin:0 0 8px"></div>
+    <div id="ex"></div>
+  </section>
 </main>
 
 <aside>
@@ -160,8 +185,9 @@ details summary{cursor:pointer}
   </section>
 
   <section>
-    <h2>Vídeos das pastas marcadas</h2>
-    <div class="list" id="lib" style="max-height:260px"></div>
+    <h2>Excluídos <span class="mut" id="banN"></span></h2>
+    <div class="list" id="banList"></div>
+    <div class="row"><button id="unbanSel">Restaurar selecionados</button><button id="unbanAll">Restaurar todos</button></div>
   </section>
 </aside>
 
@@ -172,7 +198,7 @@ const save = (k, v) => localStorage.setItem(k, JSON.stringify(v));
 const vid = $('#vid');
 const status = t => $('#status').textContent = t;
 
-let clientId = LS('clientId', ''), folders = LS('folders', []), queue = LS('queue', []), cfg = LS('cfg', { loop: false, mode: 'random', block: 3 }), cache = LS('cache2', {});
+let clientId = LS('clientId', ''), folders = LS('folders', []), queue = LS('queue', []), cfg = LS('cfg', { loop: false, mode: 'random', block: 3 }), cache = LS('cache2', {}), DIR = {}, ban = LS('ban', { v: {}, f: {} }), thumbOK = {};
 const _tk = LS('tok', {});
 let token = _tk.t || null, tokenExp = _tk.e || 0, videos = [], history = [], recent = [], cur = null, triedBlob = false, blobUrl = null, errs = 0;
 
@@ -216,7 +242,7 @@ async function listChildren(ids) {
   const par = ids.map(i => `'${i}' in parents`).join(' or ');
   do {
     const q = encodeURIComponent(`(${par}) and trashed=false`);
-    const d = await api(`files?q=${q}&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,size,shortcutDetails(targetId,targetMimeType))&supportsAllDrives=true&includeItemsFromAllDrives=true${pt ? '&pageToken=' + pt : ''}`);
+    const d = await api(`files?q=${q}&pageSize=1000&fields=nextPageToken,files(id,name,mimeType,size,parents,thumbnailLink,shortcutDetails(targetId,targetMimeType))&supportsAllDrives=true&includeItemsFromAllDrives=true${pt ? '&pageToken=' + pt : ''}`);
     out.push(...d.files); pt = d.nextPageToken;
   } while (pt);
   return out;
@@ -224,7 +250,7 @@ async function listChildren(ids) {
 
 // varre nível por nível: todas as pastas de um nível vão em lotes de 20, em paralelo
 async function loadFolder(f) {
-  const out = [], seen = new Set([f.id]);
+  const out = [], dirs = { [f.id]: { n: f.name || f.id, p: null } }, seen = new Set([f.id]);
   let level = [f.id];
   while (level.length) {
     const chunks = [];
@@ -232,14 +258,15 @@ async function loadFolder(f) {
     const res = await Promise.all(chunks.map(listChildren));
     level = [];
     for (const x of res.flat()) {
+      const par = (x.parents && x.parents[0]) || f.id;
       let id = x.id, mt = x.mimeType;
       if (mt === SHORT && x.shortcutDetails) { id = x.shortcutDetails.targetId; mt = x.shortcutDetails.targetMimeType; }
-      if (mt === FOLDER) { if (!seen.has(id)) { seen.add(id); level.push(id); } }
-      else if ((mt && mt.startsWith('video/')) || VEXT.test(x.name)) out.push({ id, name: x.name, folder: f.id, size: x.size });
+      if (mt === FOLDER) { if (!seen.has(id)) { seen.add(id); level.push(id); dirs[id] = { n: x.name, p: par }; } }
+      else if ((mt && mt.startsWith('video/')) || VEXT.test(x.name)) out.push({ id, name: x.name, folder: f.id, parent: par, size: x.size, th: x.thumbnailLink });
     }
     status(`Varrendo "${f.name || f.id}"... ${out.length} vídeos`);
   }
-  return out;
+  return { v: out, d: dirs };
 }
 
 // force = ignora o cache; only = não chama a API (usado ao abrir a página)
@@ -248,27 +275,29 @@ function reload(...a) { return loading = _reload(...a); }
 async function _reload(force, only) {
   render();
   const on = folders.filter(f => f.on);
-  if (!on.length) { videos = []; render(); return status('Marque ou adicione uma pasta.'); }
-  const all = []; let missing = false;
+  if (!on.length) { videos = []; render(); renderLib(); return status('Marque ou adicione uma pasta.'); }
+  const all = []; let missing = false; DIR = {};
   for (const f of on) {
-    if (!force && cache[f.id]) { all.push(...cache[f.id]); continue; }
+    let c = Array.isArray(cache[f.id]) ? null : cache[f.id];
+    if (!force && c) { all.push(...c.v); Object.assign(DIR, c.d); continue; }
     if (only) { missing = true; continue; }
-    try { cache[f.id] = await loadFolder(f); all.push(...cache[f.id]); }
+    try { c = cache[f.id] = await loadFolder(f); all.push(...c.v); Object.assign(DIR, c.d); }
     catch (e) { return status('Erro na pasta "' + (f.name || f.id) + '": ' + e.message); }
   }
   let warn = '';
   if (!only) { try { await idbSet('cache', cache); } catch { warn = ' (não consegui salvar a lista pra próxima vez)'; } }
   const m = new Map(); all.forEach(v => m.set(v.id, v));
-  videos = [...m.values()]; render();
+  videos = [...m.values()]; render(); renderLib();
   status(videos.length + ' vídeos nas pastas marcadas.' + (missing ? ' Tem pasta sem lista: carrego no seu primeiro clique.' : '') + warn);
 }
 
 // ---------- escolha do próximo ----------
 function pickRandom() {
-  const n = Math.min(Math.max(0, +$('#block').value || 0), videos.length - 1);
-  const banned = new Set(n > 0 ? recent.slice(-n) : []);
-  const pool = videos.filter(v => !banned.has(v.id));
-  return pool[Math.floor(Math.random() * pool.length)];
+  const P = pool();
+  const n = Math.min(Math.max(0, +$('#block').value || 0), P.length - 1);
+  const rec = new Set(n > 0 ? recent.slice(-n) : []);
+  const c = P.filter(v => !rec.has(v.id));
+  return c[Math.floor(Math.random() * c.length)];
 }
 
 async function next() {
@@ -276,9 +305,10 @@ async function next() {
   if ($('#mode').value === 'queue') {
     if (!queue.length) return status('A fila está vazia. Adicione vídeos com o botão +.');
     const i = queue.findIndex(q => q.id === cur?.id);
-    return play(queue[(i + 1) % queue.length]);
+    for (let k = 1; k <= queue.length; k++) { const q = queue[(i + k) % queue.length]; if (!isBanned(q)) return play(q); }
+    return status('Todos os vídeos da fila estão excluídos.');
   }
-  if (!videos.length) return status('Nenhum vídeo carregado ainda.');
+  if (!pool().length) return status('Nenhum vídeo disponível (nada carregado ou tudo excluído).');
   play(pickRandom());
 }
 
@@ -361,6 +391,164 @@ vid.onerror = async () => {
   else { busy(false); status('Erros demais seguidos, parei. Confere formato/permissão.'); }
 };
 
+// ---------- exclusões, miniaturas e visualização por pasta ----------
+const saveBan = () => save('ban', ban);
+const dirPath = id => { const a = []; for (let p = id, n = 0; p && DIR[p] && n < 30; p = DIR[p].p, n++) a.unshift(DIR[p].n); return a.join(' › '); };
+function isBanned(v) {
+  if (ban.v[v.id]) return true;
+  for (let p = v.parent, n = 0; p && n < 30; p = DIR[p] && DIR[p].p, n++) if (ban.f[p]) return true;
+  return false;
+}
+const pool = () => videos.filter(v => !isBanned(v));
+function afterBan() { renderLib(); if (cur && isBanned(cur)) next(); else render(); } // excluiu o que está tocando: pula
+function banVideo(v) { ban.v[v.id] = { n: v.name, p: v.parent || v.folder }; saveBan(); afterBan(); }
+function banFolder(id) { ban.f[id] = dirPath(id) || id; saveBan(); afterBan(); }
+function unban(k, id) { delete ban[k][id]; saveBan(); afterBan(); }
+$('#unbanAll').onclick = () => { ban = { v: {}, f: {} }; saveBan(); afterBan(); };
+$('#unbanSel').onclick = () => { banSel.forEach(k => delete ban[k[0]][k.slice(2)]); banSel.clear(); saveBan(); afterBan(); };
+
+// miniatura: 1) link direto, 2) link novo da API, 3) baixa com o token, 4) fica o ícone
+const io = 'IntersectionObserver' in window ? new IntersectionObserver(es => es.forEach(e => { if (e.isIntersecting) { io.unobserve(e.target); e.target._load(); } }), { rootMargin: '200px' }) : null;
+function thumb(box, v) {
+  const img = new Image(); img.referrerPolicy = 'no-referrer'; let step = 0;
+  const size = u => u.replace(/=s\d+/, '=s320');
+  img.onload = () => { thumbOK[v.id] = img.src; box.replaceChildren(img); };
+  img.onerror = async () => {
+    if (!(token && Date.now() < tokenExp - 60000)) return; // sem login válido não tenta (evita popup sozinho)
+    try {
+      step++;
+      if (step === 1) { v.th = (await api(`files/${v.id}?fields=thumbnailLink&supportsAllDrives=true`)).thumbnailLink; if (v.th) { img.src = size(v.th); return; } }
+      if (step <= 2 && v.th) {
+        const r = await fetch(size(v.th), { headers: { Authorization: 'Bearer ' + await ensureToken() } });
+        if (r.ok) img.src = URL.createObjectURL(await r.blob());
+      }
+    } catch {}
+  };
+  box._load = () => { if (thumbOK[v.id]) img.src = thumbOK[v.id]; else if (v.th) img.src = size(v.th); else img.onerror(); };
+  io ? io.observe(box) : box._load();
+}
+function withThumb(v, row) { const b = el('div', { className: 'sm', textContent: '🎬' }); thumb(b, v); row.prepend(b); return row; }
+
+function card(v, cb) {
+  const th = el('div', { className: 'th', textContent: '🎬', title: v.name, onclick: () => play(v) });
+  thumb(th, v);
+  const c = el('div', { className: 'card' + (cur?.id === v.id ? ' now' : '') }, th,
+    el('div', { className: 'nm', textContent: v.name, title: v.name }),
+    el('div', { className: 'bt' }, ...(cb ? [cb] : []),
+      el('button', { textContent: '▶', title: 'Tocar', onclick: () => play(v) }),
+      el('button', { textContent: '+', title: 'Adicionar à fila', onclick: () => { queue.push(v); save('queue', queue); render(); } }),
+      el('button', { textContent: '🚫', title: 'Excluir (não tocar mais)', onclick: () => banVideo(v) })));
+  c.dataset.id = v.id;
+  return c;
+}
+function markNow() {
+  document.querySelectorAll('.card.now').forEach(c => c.classList.remove('now'));
+  if (cur) document.querySelectorAll(`.card[data-id="${cur.id}"]`).forEach(c => c.classList.add('now'));
+}
+// ----- explorador: navega pelas pastas/subpastas e age em vários itens de uma vez -----
+let nav = null;
+const sel = new Set(), banSel = new Set(), banOpen = new Set();
+const natural = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+const isUnder = (p, id) => { for (let n = 0; p && n < 30; p = DIR[p] && DIR[p].p, n++) if (p === id) return true; return false; };
+const folderBanned = id => { for (let p = id, n = 0; p && n < 30; p = DIR[p] && DIR[p].p, n++) if (ban.f[p]) return true; return false; };
+const videosIn = id => videos.filter(v => !isBanned(v) && isUnder(v.parent || v.folder, id));
+function go(id) { nav = id; sel.clear(); renderLib(); }
+function selVideos() { // vídeos da seleção (pasta selecionada = todos os vídeos dentro dela)
+  const byId = new Map(videos.map(v => [v.id, v])), m = new Map();
+  sel.forEach(k => {
+    const id = k.slice(2);
+    if (k[0] === 'v') { const v = byId.get(id); if (v && !isBanned(v)) m.set(id, v); }
+    else videosIn(id).forEach(v => m.set(v.id, v));
+  });
+  return [...m.values()];
+}
+function playSel() {
+  const vs = selVideos(); if (!vs.length) return status('Nenhum vídeo na seleção.');
+  queue = vs; save('queue', queue); $('#mode').value = cfg.mode = 'queue'; save('cfg', cfg);
+  sel.clear(); play(vs[0]); renderLib();
+}
+function queueSel() {
+  const vs = selVideos(), have = new Set(queue.map(q => q.id)), add = vs.filter(v => !have.has(v.id));
+  add.forEach(v => queue.push(v)); save('queue', queue); sel.clear();
+  status(add.length + ' vídeo(s) adicionados à fila.'); render(); renderLib();
+}
+function banSelected() { // só tira da reprodução, não mexe no Drive
+  if (!sel.size) return status('Nada selecionado.');
+  const byId = new Map(videos.map(v => [v.id, v]));
+  sel.forEach(k => {
+    const id = k.slice(2);
+    if (k[0] === 'f') ban.f[id] = dirPath(id) || id;
+    else { const v = byId.get(id); if (v) ban.v[id] = { n: v.name, p: v.parent || v.folder }; }
+  });
+  sel.clear(); saveBan(); afterBan();
+}
+function renderLib() {
+  const L = $('#ex'), C = $('#crumb'), T = $('#exTools');
+  if (nav && (!DIR[nav] || folderBanned(nav))) nav = null;
+  const ids = []; for (let p = nav, n = 0; p && DIR[p] && n < 30; p = DIR[p].p, n++) ids.unshift(p);
+  C.replaceChildren(el('button', { textContent: '🏠 Início', onclick: () => go(null) }), ...ids.map(id => el('button', { textContent: DIR[id].n, onclick: () => go(id) })));
+  if (!videos.length && !Object.keys(DIR).length) { T.replaceChildren(); return L.replaceChildren(el('p', { className: 'mut', textContent: 'Nenhum vídeo carregado.' })); }
+  const cnt = {};
+  videos.forEach(v => { if (!isBanned(v)) for (let p = v.parent || v.folder, n = 0; p && n < 30; p = DIR[p] && DIR[p].p, n++) cnt[p] = (cnt[p] || 0) + 1; });
+  const subs = (nav ? Object.keys(DIR).filter(id => DIR[id].p === nav) : folders.filter(f => f.on && DIR[f.id]).map(f => f.id))
+    .filter(id => !ban.f[id]).sort((a, b) => natural(DIR[a].n, DIR[b].n));
+  const vids = nav ? videos.filter(v => (v.parent || v.folder) === nav && !isBanned(v)).sort((a, b) => natural(a.name, b.name)) : [];
+  const keys = [...subs.map(id => 'f:' + id), ...vids.map(v => 'v:' + v.id)], ks = new Set(keys);
+  [...sel].forEach(k => ks.has(k) || sel.delete(k));
+  const cntEl = el('span', { className: 'mut' });
+  const upd = () => { cntEl.textContent = sel.size ? `${sel.size} selecionado(s)` : `${keys.length} item(ns)`; };
+  T.replaceChildren(
+    el('button', { textContent: '☑ Tudo', onclick: () => { keys.forEach(k => sel.add(k)); renderLib(); } }),
+    el('button', { textContent: '☐ Nada', onclick: () => { sel.clear(); renderLib(); } }),
+    el('button', { textContent: '⇄ Inverter', onclick: () => { keys.forEach(k => sel.has(k) ? sel.delete(k) : sel.add(k)); renderLib(); } }),
+    cntEl,
+    el('button', { textContent: '▶ Tocar', title: 'Toca só a seleção (substitui a fila)', onclick: playSel }),
+    el('button', { textContent: '+ Fila', onclick: queueSel }),
+    el('button', { textContent: '🚫 Excluir', title: 'Só tira da reprodução, não apaga nada do Drive', onclick: banSelected }));
+  upd();
+  const chk = k => { const cb = el('input', { type: 'checkbox', checked: sel.has(k), onchange: () => { cb.checked ? sel.add(k) : sel.delete(k); upd(); } }); return cb; };
+  const rows = subs.map(id => el('div', { className: 'item' }, chk('f:' + id),
+    el('span', { textContent: `📁 ${DIR[id].n}  ·  ${cnt[id] || 0} vídeo(s)`, title: dirPath(id), style: 'cursor:pointer', onclick: () => go(id) }),
+    el('button', { textContent: 'Abrir ›', onclick: () => go(id) })));
+  const parts = [];
+  if (rows.length) parts.push(el('div', { style: 'margin-bottom:10px' }, ...rows));
+  if (vids.length) parts.push(el('div', { className: 'grid' }, ...vids.map(v => card(v, chk('v:' + v.id)))));
+  if (!parts.length) parts.push(el('p', { className: 'mut', textContent: 'Nada por aqui (ou tudo excluído).' }));
+  L.replaceChildren(...parts);
+}
+function renderSame() {
+  const sec = $('#sameSec');
+  if (!cur) { sec.style.display = 'none'; return; }
+  sec.style.display = '';
+  const pid = cur.parent || cur.folder, path = dirPath(pid) || pid;
+  const sib = videos.filter(v => (v.parent || v.folder) === pid && v.id !== cur.id && !isBanned(v));
+  $('#sameT').textContent = `📁 ${path} · mais ${sib.length} vídeo(s) nesta pasta`;
+  $('#sameAct').replaceChildren(
+    el('button', { textContent: '🚫 Excluir este vídeo', onclick: () => banVideo(cur) }),
+    el('button', { textContent: '🚫 Excluir esta pasta', onclick: () => banFolder(pid) }),
+    el('button', { textContent: '📂 Ver no explorador', onclick: () => { go(pid); $('#exSec').scrollIntoView({ behavior: 'smooth' }); } }),
+    el('button', { textContent: '+ Pasta toda na fila', onclick: () => { sib.forEach(v => queue.push(v)); save('queue', queue); render(); } }));
+  $('#same').replaceChildren(...sib.map(card));
+}
+function renderBan() {
+  const nm = x => typeof x === 'string' ? x : x.n;
+  const chk = k => { const cb = el('input', { type: 'checkbox', checked: banSel.has(k), onchange: () => { cb.checked ? banSel.add(k) : banSel.delete(k); } }); return cb; };
+  const out = Object.entries(ban.f).map(([id, n]) => el('div', { className: 'item' }, chk('f:' + id),
+    el('span', { textContent: '📁 ' + n, title: n }), el('button', { textContent: 'Restaurar', onclick: () => unban('f', id) })));
+  const g = {};
+  Object.entries(ban.v).forEach(([id, x]) => (g[(x && x.p) || ''] ||= []).push([id, nm(x)]));
+  Object.keys(g).forEach(p => {
+    const d = el('details', { className: 'dir', open: banOpen.has(p) });
+    d.ontoggle = () => { d.open ? banOpen.add(p) : banOpen.delete(p); };
+    d.append(el('summary', {}, el('span', { textContent: `🎬 ${dirPath(p) || 'Sem pasta'} (${g[p].length})` }),
+      el('button', { textContent: 'Restaurar', onclick: e => { e.preventDefault(); g[p].forEach(([id]) => delete ban.v[id]); saveBan(); afterBan(); } })),
+      ...g[p].map(([id, n]) => el('div', { className: 'item' }, chk('v:' + id), el('span', { textContent: n, title: n }))));
+    out.push(d);
+  });
+  $('#banN').textContent = Object.keys(ban.f).length + Object.keys(ban.v).length ? `(${Object.keys(ban.f).length + Object.keys(ban.v).length})` : '';
+  $('#banList').replaceChildren(...(out.length ? out : [el('p', { className: 'mut', textContent: 'Nada excluído.' })]));
+}
+
 // ---------- UI ----------
 function el(t, p = {}, ...k) { const e = Object.assign(document.createElement(t), p); e.append(...k); return e }
 function item(name, now, ...btns) {
@@ -372,12 +560,10 @@ function render() {
     return el('div', { className: 'item' }, cb, el('span', { textContent: f.name || f.id, title: f.id }),
       el('button', { textContent: '✕', title: 'Remover pasta', onclick: () => { folders.splice(i, 1); save('folders', folders); reload(); } }));
   }));
-  $('#lib').replaceChildren(...videos.map(v => item(v.name, cur?.id === v.id,
-    el('button', { textContent: '▶', title: 'Tocar', onclick: () => play(v) }),
-    el('button', { textContent: '+', title: 'Adicionar à fila', onclick: () => { queue.push(v); save('queue', queue); render(); } }))));
-  $('#queue').replaceChildren(...queue.map((v, i) => item(v.name, cur?.id === v.id,
+  renderSame(); markNow(); renderBan();
+  $('#queue').replaceChildren(...queue.map((v, i) => withThumb(v, item(v.name, cur?.id === v.id,
     el('button', { textContent: '▶', onclick: () => play(v) }),
-    el('button', { textContent: '✕', onclick: () => { queue.splice(i, 1); save('queue', queue); render(); } }))));
+    el('button', { textContent: '✕', onclick: () => { queue.splice(i, 1); save('queue', queue); render(); } })))));
 }
 
 $('#addF').onclick = async () => {
@@ -410,11 +596,12 @@ function importCfg() {
     const d = JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(decodeURIComponent(m[1])), c => c.charCodeAt(0))));
     if (d.c) { clientId = d.c; save('clientId', clientId); }
     if (Array.isArray(d.f)) { folders = d.f; save('folders', folders); }
+    if (d.b) { ban = d.b; save('ban', ban); }
     window.history.replaceState(null, '', location.pathname + location.search);
   } catch {}
 }
 $('#cfgLink').onclick = async () => {
-  const json = JSON.stringify({ c: clientId, f: folders.map(f => ({ id: f.id, name: f.name, on: f.on })) });
+  const json = JSON.stringify({ c: clientId, b: ban, f: folders.map(f => ({ id: f.id, name: f.name, on: f.on })) });
   const link = location.origin + location.pathname + '#cfg=' + encodeURIComponent(btoa(String.fromCharCode(...new TextEncoder().encode(json))));
   try { await navigator.clipboard.writeText(link); status('Link copiado! Manda pro seu celular e abre lá.'); }
   catch { prompt('Copie este link e abra no outro aparelho:', link); }
@@ -580,7 +767,7 @@ render();
   const c = await idbGet('cache'); if (c) cache = c;
   await reload(false, true);
   // se alguma pasta marcada ainda não tem lista, varre sozinho no primeiro clique (precisa de um clique pro login abrir)
-  if (folders.some(f => f.on && !cache[f.id])) {
+  if (folders.some(f => f.on && (!cache[f.id] || Array.isArray(cache[f.id])))) {
     document.addEventListener('click', () => reload(), { once: true, capture: true });
   }
 })();
